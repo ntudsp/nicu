@@ -12,9 +12,11 @@ NTU research
 data repository DR-NTU (Data) at <https://doi.org/10.21979/N9/8GHNGX>
 
 The subheadings in this repository follows the headings in the paper
-(after the \[Data Loading\] section) for consistency.
+(after the [Data Preparation](#dataprep) section) for consistency.
 
 The following figures are produced by this replication code:
+
+- [`Figure 4`](#fig_4) in [4.3 Occurence rates](#sec4.3)
 
 ## Initialisation
 
@@ -168,4 +170,166 @@ timeseries_1hour_metrics <-
                         "HD"
                         ), .before="sub_location"
                 )
+```
+
+## Acoustic variation within-between wards
+
+### 4.3 Occurrence rates
+
+#### `Figure 4`: Occurrence rate of $\textit{OR}^h_\text{SNR}(5)$ and $\textit{OR}_{T}^h(0.4)$ averaged over the same daily 1-h period throughout the entire measurement campaign. A-weighted decibel metrics and tonality metrics averaged by hour of the day across the entire measurement duration at NICU-A, NICU-B and HD-A measurement points.
+
+``` r
+SNR = 5 #SNR threshold for dBA occurence rate
+
+#compute occurrence rate
+OR_dBA_tuHMS <- timeseries.dt |>
+        #filter only binaural and dBA and tuHMS metrics
+        dplyr::filter(
+                acoUnit %in% c("dBA","tuHMS") &
+                        microphone %in% c("binL","binR") #&
+                        # datetime < ymd_hms("2022-03-05 23:00:00",
+                        #                tz = "Singapore") #for testing
+                        ) |> 
+        #prepare data frame
+        pivot_wider(
+                names_from = microphone,
+                values_from = score_1min,
+                values_fn = ~ mean(.x, na.rm = TRUE) #to handle duplicates
+        ) |>
+        #aggregate both binL and binR into binLR
+        dplyr::mutate(
+                binLR = ifelse(
+                        acoUnit == "dBA",
+                        10*log10((10^(binL/10)+10^(binR/10))/2),
+                        (binL+binR)/2
+                )
+        ) |>
+        #drop binL and binR columns
+        dplyr::select(!c(binL,binR)) |>
+        #filter only required sub locations
+        dplyr::filter(sub_location %in% c("NICU-A","NICU-B","HD-A")) |>
+        #factorise sub_location, create hour and minute column
+        dplyr::mutate(
+                sub_location = as.factor(sub_location),
+                minute = lubridate::floor_date(datetime, unit = "minute"),
+                hour = lubridate::floor_date(datetime, unit = "hour")
+                ) |>
+        #aggregate by minute
+        group_by(sub_location, acoUnit, minute) |>
+        dplyr::mutate(
+                # binLR_1h_mean = ifelse(
+                #         acoUnit == "dBA",
+                #         meandB(binLR_1min_mean),
+                #         mean(binLR_1min_mean)
+                # 50% exceedance level
+                binLR_1min_max = max(binLR)
+        ) |>
+        # summarise_by_time(
+        #         .date_var = datetime,
+        #         .by       = "minute",
+        #         binLR_1min_max=max(binLR),
+        #         binLR_1min_mean=ifelse(
+        #                 acoUnit == "dBA",
+        #                 meandB(binLR),
+        #                 mean(binLR)
+        #                 )
+        #         ) |>
+        ungroup() |>
+        distinct() |>
+        #find 1h average as the noise floor
+        dplyr::group_by(sub_location,acoUnit,hour) |>
+        dplyr::mutate(
+                # binLR_1h_mean = ifelse(
+                #         acoUnit == "dBA",
+                #         meandB(binLR_1min_mean),
+                #         mean(binLR_1min_mean)
+                # 50% exceedance level
+                binLR_50 = quantile(binLR, 0.5)
+        ) |>
+        ungroup() |>
+        distinct () |>
+        summarise(
+                .by = c(sub_location,acoUnit,hour),
+                count = n(), #number of events in an hour
+                OR = ifelse(
+                        acoUnit == "dBA", #if dBA
+                        #find the number of events > SNR of 5 dBA
+                        sum(
+                                binLR_1min_max > (binLR_50 + SNR),
+                                na.rm = TRUE
+                                )*(100/count), #1min max SPL > 1h SPL
+                        sum(binLR_1min_max > 0.4)*(100/count) #tonality > 0.4
+                )
+        ) |>
+        distinct() |>
+        #add column to aggregate hour and convert to 0 to 23 range
+        dplyr::mutate(hour_only = as.numeric(hour(hour)))
+
+or_plot <- 
+        ggplot(
+                OR_dBA_tuHMS, 
+                aes(x = as.numeric(hour_only), #convert to numeric for plot
+                    y = OR, 
+                    color = sub_location, 
+                    fill = sub_location)
+                )  + 
+        facet_wrap(
+                ~acoUnit, 
+                nrow = 2,
+                scales = "free",
+                labeller = labeller(
+                        acoUnit = as_labeller(
+                                c("dBA" = "italic(L)[AS]", "tuHMS" = "italic(T)"),
+                                label_parsed)
+                        )
+                ) + 
+        stat_summary(
+                fun = mean,
+                geom = "line",
+                linewidth = 1
+        ) +
+        stat_summary(
+                fun = mean,
+                geom = "ribbon",
+                alpha = .3,
+                linetype = 0,
+                fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)),
+                fun.min = function(x) mean(x) - sd(x) / sqrt(length(x))
+        ) +
+        scale_color_paletteer_d("Redmonder::qPBI", direction = -1) +
+        scale_fill_paletteer_d("Redmonder::qPBI", direction = -1) +
+        xlim(0,24) + ylim(0,100) +
+        ylab("% of time over threshold") +
+        xlab("Hour") +
+        scale_x_continuous(
+                breaks = seq(0, 24, by = 6),
+                minor_breaks = seq(0, 24, 2)
+                ) +
+        ggthemes::theme_hc() + 
+        theme(panel.grid.minor.y = element_line(color = 1,
+                                                size = 0.1,
+                                                linetype = 3)) +
+        theme(panel.grid.major.x = element_line(color = 1,
+                                                size = 0.1,
+                                                linetype = 1)) +
+        theme(panel.grid.minor.x = element_line(color = 1,
+                                                size = 0.1,
+                                                linetype = 3))
+
+or_plot
+```
+
+![](README_files/figure-commonmark/occurence-1.png)
+
+``` r
+ggsave(path = "output/",
+       plot = or_plot,
+       filename = "or_dBA_tuHMS.pdf",
+       device = "pdf",
+       units = "px",
+       width = 1600,
+       height = 1500,
+       #scale = 3.5,
+       scale = 2.0,
+       dpi = 600) 
 ```
