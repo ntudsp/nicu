@@ -14,9 +14,15 @@ data repository DR-NTU (Data) at <https://doi.org/10.21979/N9/8GHNGX>
 
 The subheadings in this repository follows the headings in the paper (after the [Data Preparation](#dataprep) section) for consistency.
 
-The following figures are produced by this replication code:
+The following figures and tables are produced by this replication code:
 
--   [`Figure 4`](#fig_4) in [4.3 Occurence rates](#sec4.3)
+- [`Table 4`](#tab_4) in [3.1. HD ward](#sec3.1)
+- [`Figure 3`](#fig_3) in [4.1. A- and C- weighted metrics](#sec4.1)
+- [`Table 5`](#tab_5) in [4.2. Acoustic guidelines](#sec4.2)
+- [`Figure 4`](#fig_4) in [4.3. Occurence rates](#sec4.3)
+- [`Table A.1`](#tab_A.1) in [Appendix A Statistical test results](#sec_AppendixA)
+- [`Table A.2`](#tab_A.2) in [Appendix A Statistical test results](#sec_AppendixA)
+- [`Table A.3`](#tab_A.3) in [Appendix A Statistical test results](#sec_AppendixA)
 
 ## Initialisation
 
@@ -29,14 +35,13 @@ pacman::p_load(
         #data wrangling
         dataverse, tidyverse, data.table, janitor, 
         #time series
-        timetk, lubridate,
+        lubridate,
         #acoustics
         seewave,
         #analysis
         heatwaveR, ARTool, nortest, rstatix, effectsize, emmeans,
-        caret, MASS, XICOR, corrr,
         #plotting
-        gt, gtExtras, gtsummary, Hmisc, paletteer, ggthemes, patchwork
+        gt, gtExtras, gtsummary, Hmisc, paletteer, ggthemes, patchwork, progress
 )
 
 # set timezone
@@ -233,7 +238,396 @@ timeseries_1hour_metrics <-
 
 ```
 
-## Acoustic variation within-between wards
+### Adding weeks for plotting
+
+```{r dataprep_addwk}
+
+# add week number for plotting
+firstHour<-min(timeseries_1hour_metrics$hour)
+timeseries_1hour_metrics_wk <- timeseries_1hour_metrics |> 
+        dplyr::mutate(
+        week=case_when(
+                difftime(hour, firstHour, units="days")<=7 ~ "Week 1",
+                difftime(hour, firstHour, units="days")<=14 ~ "Week 2",
+                difftime(hour, firstHour, units="days")<=21 ~ "Week 3",
+                difftime(hour, firstHour, units="days")<=28 ~ "Week 4",
+                difftime(hour, firstHour, units="days")<=35 ~ "Week 5",
+                difftime(hour, firstHour, units="days")<=42 ~ "Week 6"
+                )) |>
+        group_by(location,microphone) |>
+        arrange(hour) |>
+        ungroup()
+
+# convert to dataframe to long form
+timeseries_1hour_metrics_wk_long <- timeseries_1hour_metrics_wk |>
+        dplyr::filter(microphone %in% c("binL","binR")) |>
+        pivot_longer(cols = c(LAS:T90,`LCS-LAS`,`LAS10-LAS90`),
+                     names_to = "acoUnit_stat",
+                     values_to = "score") |>
+        pivot_wider(
+                names_from = microphone,
+                values_from = score
+        ) |>
+        #find binaural average
+        dplyr::mutate(
+                bin_LR = ifelse(
+                        grepl("^L", acoUnit_stat),
+                        10*log10((10^(binL/10)+10^(binR/10))/2),
+                        (binL+binR)/2
+                        ),
+                hour=factor(hour(hour), levels=c(0:23))
+                ) 
+
+```
+
+### Subsetting data before microphones were shifted
+
+```{r}
+#1hour aggregated dBA metrics for both locations
+timeseries_1hour_metrics_fixed <- timeseries_1hour_metrics |>
+        dplyr::filter(
+                hour >= ymd_hms("20220303 17:00:00", tz ="Singapore") & 
+                        hour <= ymd_hms("20220317 10:30:00", 
+                                          tz ="Singapore")
+                ) |>
+        dplyr::mutate(
+                location = as.factor(location)
+        )
+```
+
+
+## 3. Acoustic variation between microphone position
+
+### 3.1 HD ward {#sec3.1}
+
+#### `Table 4`: Mean and standard deviation of the differences in 1-h slow time-weighted metrics at the HD-A and NICU-A bed positions measured from 03/03/2022 17:00:00 to 17/03/2022 10:30:00. Difference pairs with significant ART contrasts are indicated in bold. {#tab_4}
+
+```{r}
+
+#compute differences separately for each location due to the different 
+#number of microphones
+
+#hd
+diff.summary.1h.hd <- timeseries_1hour_metrics_fixed |>
+        dplyr::select(!c(LAS90,LCS90:T90)) |>
+        dplyr::filter(location=="HD") |>
+        pivot_longer(
+                names_to = "acoUnit",
+                values_to = "score",
+                cols = c(
+                        LAS,LAS10,LAS50,LASmax,
+                        LCS,LCS10,LCS50,LCSmax,
+                        `LCS-LAS`,`LAS10-LAS90`)
+                ) |>
+        pivot_wider(names_from = microphone, values_from = score) |>
+        # mutate(`binL-binR`=abs(binL-binR),
+        #        `binL-146AE`=abs(binL-`146AE`),
+        #        `binR-146AE`=abs(binR-`146AE`)) %>%
+        mutate(`binL-binR`=binL-binR,
+               `binL-146AE`=binL-`146AE`,
+               `binR-146AE`=binR-`146AE`) |>
+        pivot_longer(names_to = "microphone",
+                     values_to = "score",
+                     cols = c(`146AE`:`binR-146AE`)) |>
+        #summary by acounit and microphone
+        dplyr::group_by(microphone,acoUnit) |>
+        summarise(
+                mean=round(mean(score),3),
+                sd=sd(score),
+                score=list(score)
+                ) |>
+        dplyr::mutate(location="HD",.before = microphone)
+
+#nicu
+diff.summary.1h.nicu <- timeseries_1hour_metrics_fixed |> 
+        dplyr::filter(location=="NICU") |>
+        dplyr::select(!c(LAS90,LCS90:T90)) |>
+        pivot_longer(
+                names_to = "acoUnit",
+                values_to = "score",
+                cols = c(
+                        LAS,LAS10,LAS50,LASmax,
+                        LCS,LCS10,LCS50,LCSmax,
+                        `LCS-LAS`,`LAS10-LAS90`)
+                ) |>
+        pivot_wider(names_from = microphone, values_from = score) |>
+        mutate(
+                `binL-binR`=binL-binR,
+                `binL-146AEIn`=binL-`146AEIn`,
+                `binL-146AEOut`=binL-`146AEOut`,
+                `binR-146AEIn`=binR-`146AEIn`,
+                `binR-146AEOut`=binR-`146AEOut`,
+                `146AEIn-146AEOut`=`146AEIn`-`146AEOut`
+               ) |>
+        pivot_longer(
+                names_to = "microphone",
+                values_to = "score",
+                cols = c(`146AEIn`:`146AEIn-146AEOut`)
+                ) |>
+        #summary by acounit and microphone
+        dplyr::group_by(microphone,acoUnit) |>
+        summarise(mean=round(mean(score),3),
+                  sd=sd(score),
+                  score=list(score)) |>
+        dplyr::mutate(location="NICU",.before = microphone)
+
+# Define a function to apply md() to each column label
+md_label <- function(label) {
+  md(label)
+}
+
+#plot table of differences across all locations
+gt.diff.summary.1h <- rbind(diff.summary.1h.hd,diff.summary.1h.nicu) |>
+        dplyr::filter(!microphone %in% c("146AE","binL","binR",
+                                         "146AEIn","146AEOut")) |>
+        dplyr::mutate(mean_sd=paste0(formatC(mean,
+                                             format = "f",
+                                             digits = 2),
+                                     " (", 
+                                     formatC(sd,
+                                             format = "f",
+                                             digits = 2), 
+                                     ")")) |>
+        pivot_wider(
+                id_cols = acoUnit,
+                names_from = c(location,microphone),
+                values_from = mean_sd
+        ) |>
+        gt::gt() |>
+        tab_spanner(
+                label = "HD",
+                columns = starts_with("HD")
+                ) |>
+        tab_spanner(
+                label = "NICU",
+                columns = starts_with("NICU")
+                ) |>
+        cols_label_with(
+                fn = ~ gsub("HD_|NICU_","", .)
+        ) |>
+        cols_label_with(
+                fn = ~ gsub("146AE ","mout ",.)
+        ) |>
+        cols_label_with(
+                fn = ~ gsub("bin|146AE","m",.)
+        ) |>
+        cols_label_with(
+                fn = ~ gsub("(In|Out)", "\\L\\1", ., perl = TRUE)
+        ) |>
+        cols_label_with(
+                fn = ~ gsub("(R|L|out|in)", "<sub>\\1</sub>", .,
+                            perl = TRUE)
+        ) |> 
+        cols_label_with (
+                fn = ~ md_label(.)
+        )
+
+gt.diff.summary.1h |> gtsave(filename = "diff_1h_meansd.tex",
+                             path = "output/")
+
+gt.diff.summary.1h
+
+```
+
+
+## 4. Acoustic variation within-between wards
+
+### 4.1 A- and C-weighted metrics {#sec4.1}
+
+#### `Figure 3`: A- and C-weighted decibel metrics averaged by hour of the day across the entire measurement duration at NICU-A, NICU-B and HD-A measurement points. {#fig_3}
+
+```{r acmetrics}
+
+# define labels for metrics
+acoUnit_stat_labs <- c("L[AS]","L[ASmax]","L[AS10]","L[AS50]","L[AS90]",
+                       "L[CS]","L[CSmax]","L[CS10]","L[CS50]","L[CS90]",
+                       "T","T[max]","T[10]","T[50]","T[90]",
+                       "L[CS]-L[AS]","L[AS10]-L[AS90]")
+names(acoUnit_stat_labs) <- unique(timeseries_1hour_metrics_wk_long$acoUnit_stat)
+
+# define plot customisation parameters
+acoUnit.plotlist<-list()
+acoMetric.units<-c("dB(A)","dB(C)","tu[HMS]")
+ylim.list<-list(c(65,85),
+             c(65,85),
+             c(0,2.5))
+
+acoMetric_list<-c("LA","LC","T")
+
+# generate plot
+idx<-0
+for (acoMetric in acoMetric_list) {
+        idx<-idx+1
+        acoUnit.plotlist[[idx]] <- ggplot(
+                data = timeseries_1hour_metrics_wk_long |>
+                        dplyr::filter(
+                                grepl(paste0("^",acoMetric), acoUnit_stat) &
+                                        !acoUnit_stat %in% 
+                                        c(
+                                                "LCS-LAS",
+                                                "LAS10-LAS90",
+                                                "LAS90","LCS90","T90"
+                                                ) &
+                                        !sub_location == "HD-B"
+                                ),
+                aes(
+                        x = as.numeric(hour),
+                        y = bin_LR,
+                        color = sub_location,
+                        fill = sub_location),
+                ) +
+                stat_summary(
+                        fun = mean,
+                        geom = "line",
+                        linewidth = 1
+                        ) +
+                stat_summary(
+                        fun = mean,
+                        geom = "ribbon",
+                        alpha = .3,
+                        #fill = "#EB5286",
+                        fun.max = function(x) mean(x) + sd(x) / sqrt(length(x)),
+                        fun.min = function(x) mean(x) - sd(x) / sqrt(length(x))
+                        ) +
+                scale_color_paletteer_d("Redmonder::qPBI", direction = -1,
+                                        name = "Location"
+                                       ) +
+                scale_fill_paletteer_d("Redmonder::qPBI", direction = -1,
+                                       name = "Location"
+                                       ) +
+                facet_wrap(
+                        ~acoUnit_stat, ncol = 6,
+                        labeller = labeller(
+                        #acoUnit=acoUnit.labs,
+                        acoUnit_stat=as_labeller(
+                                acoUnit_stat_labs,label_parsed))) +
+                ggthemes::theme_hc() + 
+                scale_x_continuous(
+                        breaks = seq(0, 24, by = 6),
+                        minor_breaks = seq(0, 24, 2)
+                     ) +
+                theme(panel.grid.minor.y = element_line(color = 1,
+                                          size = 0.1,
+                                          linetype = 3)) +
+                theme(panel.grid.major.x = element_line(color = 1,
+                                          size = 0.1,
+                                          linetype = 1)) +
+                theme(panel.grid.minor.x = element_line(color = 1,
+                                          size = 0.1,
+                                          linetype = 3)) +
+                #xlim(0,23) +
+                #ylim(ylim.list[[idx]])+
+                xlab("Hour") + 
+                labs(
+                        y=parse(text = acoMetric.units[idx])
+                ) 
+        
+        
+        if (acoMetric == "LA" ) {
+                acoUnit.plotlist[[idx]] <- acoUnit.plotlist[[idx]] + 
+                        #65 dB limit for LAS10, CC 9th ed
+                        geom_hline(
+                                data =  data.frame(yint=65, acoUnit_stat = "LAS10"),
+                                aes(yintercept = yint),
+                                color = "maroon",
+                                linetype = "dashed"
+                                ) +
+                        #50 dB limit for LAS50, CC 9th ed
+                        geom_hline(
+                                data =  data.frame(yint=50, acoUnit_stat = "LAS50"),
+                                aes(yintercept = yint),
+                                color = "maroon",
+                                linetype = "dashed"
+                                ) +
+                        #45 dB limit for LAS, 8th ed
+                        geom_hline(
+                                data =  data.frame(yint=45, acoUnit_stat = "LAS"),
+                                aes(yintercept = yint),
+                                color = "maroon",
+                                linetype = "dashed"
+                                ) +
+                        #65 dB limit for LASmax, 8th ed
+                        geom_hline(
+                                data =  data.frame(yint=65, acoUnit_stat = "LASmax"),
+                                aes(yintercept = yint),
+                                color = "maroon",
+                                linetype = "dashed"
+                                )
+        }
+}        
+
+#Combine plot
+p.all <- (acoUnit.plotlist[[1]] + 
+                theme(legend.position = "none") +
+                xlab("")) / 
+        # (acoUnit.plotlist[[2]] + theme(legend.position = "none")  +
+        #         xlab("")) / 
+        acoUnit.plotlist[[2]]
+
+#display plot
+p.all
+
+#save plot
+ggsave(path = "output/",
+       plot = p.all,
+       filename = "fig3_acmetrics_24h.pdf",
+       device = "pdf",
+       units = "px",
+       width = 1600,
+       height = 1500,
+       scale = 3.5,
+       dpi = 600) 
+
+
+```
+
+### 4.2 Acoustic guidelines {#sec4.2}
+
+#### `Table 5:` Summary of mean A-weighted metrics and percentage of time where the metrics were within \textit{CC} guidelines over $N=981$, $N=392$, and $N=98$ 1-h periods at HD-A, NICU-A and NICU-B bed positions, respectively. {#tab_5}
+
+```{r}
+
+timeseries_1hour_CC_regulations <- timeseries_1hour_metrics |>
+        dplyr::mutate(CC9_LAS10=ifelse(LAS10<=65,"Yes","No"),
+                      CC9_LAS50=ifelse(LAS50<=50,"Yes","No"),
+                      CC8_LASmax=ifelse(LASmax<=65,"Yes","No"),
+                      CC8_LAS=ifelse(LAS<=45,"Yes","No")) |>
+        dplyr::mutate(across(c(CC9_LAS10:CC8_LAS),
+                             ~factor(.,levels=c("Yes","No"))))
+
+gt_subloc_reg_summary <- timeseries_1hour_CC_regulations |>
+        dplyr::select(
+                sub_location,microphone,LAS,LAS10,LAS50,LASmax,
+                CC9_LAS10,CC9_LAS50,CC8_LASmax,CC8_LAS
+                ) |>
+        dplyr::filter(!sub_location=="HD-B") |>
+        gtsummary::tbl_strata(
+                strata = sub_location,
+                .tbl_fun =
+                        ~ .x |>
+                        dplyr::mutate(microphone = droplevels(microphone)) |>
+                        gtsummary::tbl_summary(
+                                by = microphone,
+                                type = list(c(CC9_LAS10:CC8_LAS) ~ "categorical",
+                            c(LAS:LASmax) ~ "continuous"),
+                                statistic = list(c(LAS:LASmax) ~ "{mean} ({sd})"),
+                                digits = c(LAS:LASmax) ~ 2
+                                ),
+                        .header = "**{strata}**"
+        ) 
+
+gt_subloc_reg_summary
+
+gt_subloc_reg_summary |>
+        gtsummary::as_gt() |>
+        gt::gtsave(
+                filename = paste0(
+                                "regulation.summary.tbl.subloc.tex"
+                                ),
+                        path = "./output/"
+                )
+
+```
 
 ### 4.3 Occurrence rates {#sec4.3}
 
@@ -278,32 +672,15 @@ OR_dBA_tuHMS <- timeseries.dt |>
         #aggregate by minute
         group_by(sub_location, acoUnit, minute) |>
         dplyr::mutate(
-                # binLR_1h_mean = ifelse(
-                #         acoUnit == "dBA",
-                #         meandB(binLR_1min_mean),
-                #         mean(binLR_1min_mean)
-                # 50% exceedance level
+                #max
                 binLR_1min_max = max(binLR)
         ) |>
-        # summarise_by_time(
-        #         .date_var = datetime,
-        #         .by       = "minute",
-        #         binLR_1min_max=max(binLR),
-        #         binLR_1min_mean=ifelse(
-        #                 acoUnit == "dBA",
-        #                 meandB(binLR),
-        #                 mean(binLR)
-        #                 )
-        #         ) |>
+        
         ungroup() |>
         distinct() |>
         #find 1h average as the noise floor
         dplyr::group_by(sub_location,acoUnit,hour) |>
         dplyr::mutate(
-                # binLR_1h_mean = ifelse(
-                #         acoUnit == "dBA",
-                #         meandB(binLR_1min_mean),
-                #         mean(binLR_1min_mean)
                 # 50% exceedance level
                 binLR_50 = quantile(binLR, 0.5)
         ) |>
@@ -381,7 +758,7 @@ or_plot
 
 ggsave(path = "output/",
        plot = or_plot,
-       filename = "or_dBA_tuHMS.pdf",
+       filename = "fig4_or_dBA_tuHMS.pdf",
        device = "pdf",
        units = "px",
        width = 1600,
@@ -389,4 +766,281 @@ ggsave(path = "output/",
        #scale = 3.5,
        scale = 2.0,
        dpi = 600) 
+```
+
+## Appendix A {#sec_AppendixA}
+
+### `Table A.1`: Summary of LME-ART-ANOVA and posthoc contrast tests with microphone type as the fixed effect, and 1-h time periods as the random effect for each acoustic metric at the HD ward. {#tab_A.1}
+
+```{r artanova_mic}
+
+#ART ANOVA repeated measures between microphones at each site
+#initialise data frame
+
+#data frame to store main effects of 1-W RM ART ANOVA
+art_main_mic_df <- data.frame(
+        term = as.character(),
+        test = as.character(),
+        location = as.character(),
+        acoUnit = as.character(),
+        p.value = as.numeric(),
+        eff.size = as.numeric()
+        )
+
+metric_list <- c("LAS","LAS10","LAS50","LASmax",
+                 "LCS","LCS10","LCS50","LCSmax",
+                 "LCS-LAS","LAS10-LAS90")
+
+#iterate through all the metrics for 1W RM ART ANOVA main effects
+for (metricIdx in metric_list) {
+
+#for each location (each location has different number of microphones)             
+for (loc in unique(timeseries_1hour_metrics_fixed$location)) {
+                #ART ANOVA
+                model = art(
+                        as.formula(
+                                paste0("`",metricIdx,"` ~ microphone + (1|hour)")
+                                ),
+                        data = timeseries_1hour_metrics_fixed |>
+                                dplyr::filter(location==loc) #|>
+                        #dplyr::select(!c(LAS90,LCS:LCS90))
+                )
+        
+        #effect size partial eta squared
+        Result.model = anova(model)
+
+        model_eff<-omega_squared(model)     
+                
+        art_main_mic_df <- rbind(
+                art_main_mic_df,
+                data.frame(
+                        term=Result.model$Term,
+                        test="LME-ART-ANOVA",
+                        location=loc,
+                        acoUnit=metricIdx,
+                        p.value=Result.model$`Pr(>F)`,
+                        eff.size=model_eff$Omega2_partial)
+                )
+        
+        #contrast tests on microphones
+        marginal <- art.con(model, "microphone")
+
+        art_main_mic_df <- rbind(
+                art_main_mic_df,
+                data.frame(
+                        term=data.frame(marginal)$contrast,
+                        test="ART Contrasts",
+                        location=loc,
+                        acoUnit=metricIdx,
+                        p.value=data.frame(marginal)$p.value,
+                        eff.size=NA
+                        )
+                )
+}
+}
+#}
+
+#add significance symbols
+art_main_mic_df<-art_main_mic_df |>
+        dplyr::mutate(
+                #add signif symbol
+                sig = symnum(
+                        p.value, corr = FALSE, na = FALSE,
+                        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+                        symbols = c("****", "***", "**", "*", " ")
+                        ),
+                #add effect size symbol
+                eff = symnum(
+                        abs(eff.size), corr = FALSE, na = FALSE,
+                        cutpoints = c(0, 0.01, 0.06, 0.14, 1),
+                        symbols = c(" ", "S", "M", "L")
+                        ),
+                pvalue_sig = paste0(
+                        sig,
+                        formatC(p.value, format = "f", digits=4)
+                        ),
+                eff_sym = ifelse(
+                        is.na(eff.size),
+                        "",
+                        paste0(
+                                "(", eff, ")",
+                                formatC(eff.size, format = "f", digits=2)
+                                )
+                        )
+                )
+
+```
+
+Plot summary of LME-ART-ANOVA and postboc contrast tests for each metric at HD ward
+
+```{r artanova_mic_hd}
+
+gt_art_mic_HD <- art_main_mic_df |>
+        dplyr::filter(location == "HD") |>
+        dplyr::select(!c("p.value","eff.size","sig","eff","location")) |>
+        gt(
+                groupname_col = "acoUnit"
+        )
+
+gt_art_mic_HD |>
+        gtsave(filename = "art_mic_HD.tex",
+                             path = "output/")
+
+gt_art_mic_HD
+
+```
+
+
+### `Table A.2`: Summary of LME-ART-ANOVA and posthoc contrast tests with microphone type as the fixed effect, and 1-h time periods as the random effect for each acoustic metric at the NICU ward {#tab_A.2}
+
+```{r artanova_nicu}
+
+gt_art_mic_NICU <- art_main_mic_df |>
+        dplyr::filter(location == "NICU") |>
+        dplyr::select(!c("p.value","eff.size","sig","eff","location")) |>
+        gt(
+                groupname_col = "acoUnit"
+        )
+gt_art_mic_NICU |>
+        gtsave(filename = "art_mic_NICU.tex",
+                             path = "output/")
+
+gt_art_mic_NICU
+
+```
+
+### `Table A.3`: Summary of LME-ART-ANOVA and posthoc contrast tests with bed position as the fixed effect, and 1-h time periods and microphone type as the random effects for each acoustic metric. {#tab_A.3}
+
+The difference between sites are investigated independently at each of the NICU and HD wards. In the NICU, differences were investigated between NICU-A and NICU-B; and between HD-A and HD-B in the HD ward.
+
+```{r artanova_subloc}
+
+metric_list <- c(
+        "LAS","LAS10","LAS50","LASmax",
+        "LCS","LCS10","LCS50","LCSmax"
+         )
+
+#data frame to store main effects of 1-W RM ART ANOVA
+art_main_subloc_df <- data.frame(
+        acoUnit=as.character(),
+        term=as.character(),
+        test=as.character(),
+        p.value=as.numeric(),
+        eff.size=as.numeric()
+        )
+
+# Create a progress bar
+pb <- progress_bar$new(
+  format = "  Processing metrics [:bar] :percent (:current/:total) :eta",
+  total  = length(metric_list),
+  clear  = FALSE,
+  width  = 60
+)
+
+#iterate through all the metrics for 1W RM ART ANOVA main effects
+#linear mixed-effects model where the site is a fixed 
+#effect, and time and microphone positions are random effects
+
+for (metricIdx in metric_list) {
+        # update the progress bar
+        pb$tick()
+        
+        data_filtered <- timeseries_1hour_metrics |>
+                        dplyr::filter(
+                                sub_location %in% c(
+                                        "HD-A","NICU-A","NICU-B"
+                                        ) &
+                                microphone %in% c("binL","binR")
+                        )
+
+        m.art = art(
+                as.formula(paste0(
+                        "`",metricIdx,
+                        "` ~ sub_location + (1|hour) + (1|microphone)"
+                        )),
+                data = data_filtered
+                )
+        
+        #effect size partial eta squared
+        Result.model = anova(m.art)
+        
+        model_eff<-omega_squared(m.art)
+        
+        #add main effects test results
+        art_main_subloc_df <- rbind(
+                art_main_subloc_df,
+                data.frame(
+                        #location=loc,
+                        acoUnit=metricIdx,
+                        test="LME-ART-ANOVA",
+                        term=Result.model$Term,
+                        p.value=Result.model$`Pr(>F)`,
+                        eff.size=model_eff$Omega2_partial)
+                )
+        
+        #if main effect p < 0.05 run contrast tests
+        if (Result.model$`Pr(>F)` < 0.05) {
+                con_test_sum <- summary(
+                        art.con(
+                                m.art,
+                                "sub_location",
+                                adjust = "bonferroni"
+                                )
+                )
+                
+                #compute cohen's d effect siz with art model
+                m.art.subloc <- artlm(m.art, "sub_location")
+
+                con_test_sum$d = con_test_sum$estimate / car::sigmaHat(m.art.subloc)
+                
+                art_main_subloc_df <- rbind(
+                        art_main_subloc_df,
+                        data.frame(
+                        acoUnit=metricIdx,
+                        test="ART Contrasts",
+                        term=con_test_sum$contrast,
+                        p.value=con_test_sum$p.value,
+                        eff.size=con_test_sum$d)
+                        )
+        }
+}
+
+#add significance stars
+art_main_subloc_df <- art_main_subloc_df |>
+        mutate(
+                #add signif symbol
+                sig = symnum(
+                        p.value, corr = FALSE, na = FALSE,
+                        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+                        symbols = c("****", "***", "**", "*", " ")
+                        ),
+                #add effect size symbol
+                eff = symnum(
+                        abs(eff.size), corr = FALSE, na = FALSE,
+                        cutpoints = c(0, 0.01, 0.06, 0.14, 10000),
+                        symbols = c(" ", "S", "M", "L")
+                ),
+                pvalue_sig=paste0(
+                        sig,
+                        formatC(p.value, format = "f", digits=4)
+                        ),
+                eff_sym=ifelse(
+                        eff==" ",
+                        formatC(eff.size, format = "f", digits=2),
+                        paste0(
+                                "(", eff, ")",
+                                formatC(eff.size, format = "f", digits=2)
+                                )
+                )
+        ) |>
+        dplyr::select(!c("p.value","eff.size","sig","eff")) 
+
+art_main_subloc_df |>
+        gt() |>
+        gtsave(filename = "art_subloc.tex",
+                             path = "output/")
+
+art_main_subloc_df |>
+        gt() 
+
 ```
